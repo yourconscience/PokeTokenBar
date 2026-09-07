@@ -1490,7 +1490,10 @@ enum LocalUsageReader {
                   message["stopReason"] as? String != "error",
                   let messageUsage = message["usage"] as? [String: Any] else { return nil }
             usage = messageUsage
-            model = (message["model"] as? String) ?? "omp"
+            // omp forks route several models through one session log; some write the model at the
+            // envelope level (e.g. `openrouter/stealth/ox-alpha`) while vanilla pi-format nests it
+            // in the message. Envelope wins, message is the fallback — parity with `parsePiFile`.
+            model = (envelope["model"] as? String) ?? (message["model"] as? String) ?? "omp"
             date = piMessageDate(message, envelope: envelope)
         case "compaction", "branch_summary":
             usage = envelope["usage"] as? [String: Any] ?? [:]

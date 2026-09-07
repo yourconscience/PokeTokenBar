@@ -208,6 +208,69 @@ final class OmpUsageTests: XCTestCase {
         XCTAssertEqual(daily.totalCost, 0.005, accuracy: 1e-12)
     }
 
+    /// omp forks may write the model at the envelope level (e.g. OpenRouter routes) while
+    /// vanilla pi-format nests it in the message; both are attributed, and `daily(includeModels:)`
+    /// breaks the day down per model. Parity with the Pi provider (#225).
+    func testAttributesModelFromEnvelopeAndMessageAndBreaksDownDailyByModel() throws {
+        let jsonl = """
+        {"type":"message","id":"env01","timestamp":"2026-07-03T02:00:00.000Z","model":"openrouter/stealth/ox-alpha","message":{"role":"assistant","content":[],"usage":{"input":100,"output":200,"cacheRead":0,"cacheWrite":0,"totalTokens":300}}}
+        {"type":"message","id":"msg01","timestamp":"2026-07-03T02:00:05.000Z","message":{"role":"assistant","content":[],"model":"moonshotai/Kimi-K3","usage":{"input":10,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":30}}}
+        """
+        let url = root.appendingPathComponent("-Users-x-Proj/models.jsonl")
+        try jsonl.write(to: url, atomically: true, encoding: .utf8)
+        let entries = try XCTUnwrap(LocalUsageReader.parseOmpFile(url, fmt: LocalUsageReader.localDayFormatter()))
+        XCTAssertEqual(entries.count, 2)
+        XCTAssertEqual(entries.first { $0.id.hasSuffix("env01") }?.model, "openrouter/stealth/ox-alpha",
+                       "envelope-level model wins (omp forks write it there)")
+        XCTAssertEqual(entries.first { $0.id.hasSuffix("msg01") }?.model, "moonshotai/Kimi-K3",
+                       "message-level model is the fallback (vanilla pi-format)")
+
+        let day = "2026-07-03"
+        let daily = try XCTUnwrap(
+            LocalUsageReader.daily(entries: entries, localDay: day, includeModels: true))
+        XCTAssertEqual(daily.totalTokens, 330)
+        let models = try XCTUnwrap(daily.models)
+        XCTAssertEqual(models["openrouter/stealth/ox-alpha"], 300)
+        XCTAssertEqual(models["moonshotai/Kimi-K3"], 30)
+
+        XCTAssertNil(
+            LocalUsageReader.daily(entries: entries, localDay: day)?.models,
+            "daily() still gates the per-model breakdown behind includeModels")
+    }
+
+    /// The defect lives one layer up from `daily`: `LocalOmpProvider.fetchDaily` must carry the
+    /// per-model breakdown through (parity with Pi's #225 provider test). Unlike Pi's flat-rate
+    /// zeroing, omp preserves the source-reported cost — a fixture routed through `fetchDaily()`
+    /// covers both the repackaging and the cost distinction.
+    func testProviderFetchDailyForwardsBreakdownAndKeepsCost() async throws {
+        let iso = Self.isoUTC.string(from: Date())
+        let jsonl = """
+        {"type":"message","id":"env01","timestamp":"\(iso)","model":"openrouter/stealth/ox-alpha","message":{"role":"assistant","content":[],"usage":{"input":100,"output":200,"cacheRead":0,"cacheWrite":0,"totalTokens":300,"cost":{"total":0.01}}}}
+        {"type":"message","id":"msg01","timestamp":"\(iso)","message":{"role":"assistant","content":[],"model":"moonshotai/Kimi-K3","usage":{"input":10,"output":20,"cacheRead":0,"cacheWrite":0,"totalTokens":30,"cost":{"total":0.002}}}}
+        """
+        try jsonl.write(to: root.appendingPathComponent("-Users-x-Proj/today.jsonl"),
+                        atomically: true, encoding: .utf8)
+
+        let provider = LocalOmpProvider(cache: LocalUsageCache(ompRoots: [root], fileURL: cacheFile))
+        let fetched = try await provider.fetchDaily()
+        let daily = try XCTUnwrap(fetched)
+
+        XCTAssertEqual(daily.totalTokens, 330)
+        XCTAssertEqual(daily.totalCost, 0.012, accuracy: 1e-9,
+                       "omp keeps the source-reported cost (not flat-rate like Pi)")
+        let models = try XCTUnwrap(daily.models, "the breakdown must survive provider repackaging")
+        XCTAssertEqual(models["openrouter/stealth/ox-alpha"], 300)
+        XCTAssertEqual(models["moonshotai/Kimi-K3"], 30)
+    }
+
+    private static let isoUTC: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'"
+        return f
+    }()
+
     func testPrintRealOmpAggregate() throws {
         guard ProcessInfo.processInfo.environment["PTB_PARITY"] == "1" else {
             throw XCTSkip("set PTB_PARITY=1 for the local omp smoke test")

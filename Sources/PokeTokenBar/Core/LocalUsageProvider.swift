@@ -223,17 +223,25 @@ struct LocalPiProvider: UsageProvider {
 struct LocalOmpProvider: UsageProvider {
     let id = "omp"
     let displayName = "omp"
+    /// Cache seam — default is the shared cache (real logs); tests inject fixture roots.
+    let cache: LocalUsageCache
+
+    init(cache: LocalUsageCache = .shared) { self.cache = cache }
 
     func fetchDaily() async throws -> DailyUsage? {
         let now = Date()
-        let entries = await LocalUsageCache.shared.ompEntries(modifiedSince: Calendar.current.startOfDay(for: now))
-        return LocalUsageReader.daily(entries: entries, localDay: LocalUsageReader.todayKey())
+        let entries = await cache.ompEntries(modifiedSince: Calendar.current.startOfDay(for: now))
+        // omp routes several models (e.g. OpenRouter) through one session log → surface the
+        // per-model breakdown (parity with Pi). Unlike Pi's flat rate, omp reports a real charge
+        // (`usage.cost.total`), so the cost passes through unchanged — do not zero it here.
+        return LocalUsageReader.daily(
+            entries: entries, localDay: LocalUsageReader.todayKey(), includeModels: true)
     }
 
     func fetchEnrichment() async -> ProviderEnrichment {
         let now = Date()
         let monthStart = LocalUsageReader.startOfMonth(now)
-        let entries = await LocalUsageCache.shared.ompEntries(
+        let entries = await cache.ompEntries(
             modifiedSince: LocalUsageReader.enrichmentScanStart(now: now))
         let fmt = LocalUsageReader.localDayFormatter()
         var r = ProviderEnrichment()
